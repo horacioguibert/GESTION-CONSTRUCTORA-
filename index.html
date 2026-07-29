@@ -1000,6 +1000,13 @@ tr.fdUso:hover td{background:#FDECEC}
 .t3Dentro{font-size:26px;font-weight:700;fill:#fff;text-anchor:middle;
   stroke:rgba(0,0,0,.38);stroke-width:3.5;paint-order:stroke;letter-spacing:.3px}
 @media print{ .hojaCharts .t3Dentro{font-size:24px;stroke-width:3} }
+.pgIn{width:100%;text-align:right;border:1px solid #c3ccd6;background:var(--verde);padding:2px 6px;
+  font-size:11.5px;font-variant-numeric:tabular-nums;height:22px}
+.pgIn::placeholder{color:#B4BECA}
+.apCarga{display:flex;gap:12px;align-items:flex-end;margin:10px 0 12px;flex-wrap:wrap}
+.apCarga label{display:flex;flex-direction:column;font-size:9.5px;letter-spacing:.9px;color:var(--gris);font-weight:700;gap:3px}
+.apCarga input,.apCarga select{height:34px;font-size:14px;padding:0 8px;border:1px solid #c3ccd6;background:var(--verde)}
+.apCarga #ap_m{width:170px;text-align:right;font-weight:700}
 </style></head>
 <body>
 <header><button class="home" onclick="nav('menu')">⌂</button><h1 id="tit">GESTIÓN CONSTRUCTORA</h1>
@@ -1028,7 +1035,9 @@ function bootSchema(d){
   CREATE TABLE capataz(id INTEGER PRIMARY KEY, nombre TEXT, pin TEXT);
   CREATE TABLE audit(id INTEGER PRIMARY KEY, ts TEXT, usuario TEXT, accion TEXT, mov_id INTEGER, campo TEXT, antes TEXT, despues TEXT);
   CREATE TABLE conf(k TEXT PRIMARY KEY, v TEXT);
-  CREATE TABLE escala(categoria TEXT PRIMARY KEY, vh REAL);`);
+  CREATE TABLE escala(categoria TEXT PRIMARY KEY, vh REAL);
+  CREATE TABLE liqpago(per TEXT, legajo INTEGER, neto REAL DEFAULT 0, premio REAL DEFAULT 0, PRIMARY KEY(per,legajo));
+  CREATE TABLE liqap(per TEXT PRIMARY KEY, monto REAL DEFAULT 0, cuenta TEXT, fecha TEXT);`);
 
   const CM=["cuenta","tipo","cbte","tcbte","emis","pago","cant","concepto","prov","ctadest","cheque",
             "neto","iva","ivarp","gcia","iibb","categ","sub","obra","etapa"];
@@ -1113,10 +1122,10 @@ function renderMenu(){
       <button class="btn azul" onclick="nav('plan')">PLAN DE CUENTAS</button>
      </div>
      <div>
-      <div class="grupo">Liquidación Sueldos</div>
-      <button class="btn azul" onclick="nav('liq')">LIQUIDACIÓN M.O.</button>
-      <button class="btn azul" onclick="nav('rec')">RECIBOS M.O.</button>
-      <button class="btn azul" onclick="nav('exp')">EXPORTACIÓN liq. M.O.</button>
+      <div class="grupo">Mano de Obra</div>
+      <button class="btn azul" onclick="nav('horas')">1 · HORAS PARA EL CONTADOR</button>
+      <button class="btn azul" onclick="nav('pago')">2 · PAGO DE LA QUINCENA</button>
+      <button class="btn azul" onclick="nav('aport')">3 · APORTES M.O.</button>
       <button class="btn azul" onclick="nav('costo')">COSTO M.O. x OBRA</button>
      </div>
     </div>
@@ -1131,6 +1140,8 @@ function renderMenu(){
       <button class="btn carbon" onclick="verFin('flujo')">$ FLUJO FONDOS</button>
       <button class="btn carbon" onclick="verFin('imp')">$ IMPUESTOS</button>
       <button class="btn carbon" onclick="verFin('iva')">$ IVA POSICIONES</button>
+      <button class="btn carbon" onclick="verFin('iibb')">$ INGRESOS BRUTOS</button>
+      <button class="btn carbon" onclick="verFin('gcia')">$ GANANCIAS</button>
       <button class="btn carbon" onclick="verFin('ret')">$ RETENCIONES</button>
       <button class="btn carbon" onclick="verFin('acop')">$ ACOPIOS / DESACOPIOS</button>
       <button class="btn carbon" onclick="verFin('conc')">$ CONCILIACIÓN BANCARIA</button>
@@ -2001,7 +2012,7 @@ function dossierPDF(){
   RPTFILA="";
   renderCert(); hojas.push(tomar());
   renderFondo(); hojas.push(tomar());
-  for(const k of ["flujo","imp","iva","ret","acop"]){ FINTIPO=k; FINPROY=""; renderFin(); hojas.push(tomar()); }
+  for(const k of ["flujo","imp","iva","iibb","gcia","ret","acop"]){ FINTIPO=k; FINPROY=""; renderFin(); hojas.push(tomar()); }
   const CT=window.DATOS.maestros.cuentas.filter(c=>/^BANCO/i.test(c));
   FINTIPO="ext";
   for(const c of CT){ FINCTA=c; renderFin(); hojas.push(tomar()); }
@@ -2209,211 +2220,255 @@ function renderCert(){
   </div>`;
 }
 
-/* ==================== LIQUIDACIÓN DE SUELDOS ====================
-   Toma las horas del parte diario, les aplica la escala y los porcentajes de CONFIG
-   y produce el neto a cobrar, los recibos y los asientos que van a la planilla.
-   Nada se carga dos veces: las horas ya están, los porcentajes también. */
+/* ==================== MANO DE OBRA ====================
+   Los recibos los liquida el contador en ARCA. Acá se hacen tres cosas:
+   1) se le pasa el cierre de horas, 2) se carga lo que él determinó y se paga,
+   3) se imputa todo a las obras usando las horas que ya están cargadas.
+   Los porcentajes de CONFIG no generan asientos: sirven para controlar al contador. */
 function rangoQna(){
   const m=cfgN("mes",7), a=cfgN("anio",2026), qn=cfgN("qna",2);
   const fin=new Date(a,m,0).getDate(), p=n=>String(n).padStart(2,"0");
   return qn==1?[`${a}-${p(m)}-01`,`${a}-${p(m)}-15`]:[`${a}-${p(m)}-16`,`${a}-${p(m)}-${fin}`];
 }
+const qnaId = () => `${cfg("anio")}-${String(cfgN("mes",7)).padStart(2,"0")}-${cfg("qna")}`;
 const qnaTxt = () => { const [d,h]=rangoQna();
   return `${d.slice(8)}/${d.slice(5,7)} al ${h.slice(8)}/${h.slice(5,7)}/${h.slice(2,4)}`; };
-function liquidar(){
+
+/* horas de la quincena, con el reparto por obra de cada operario */
+function horasQna(){
   const [D,H]=rangoQna();
-  const R=q(`SELECT p.legajo, o.nombre, o.categoria, o.ingreso, o.afiliado,
+  const R=q(`SELECT p.legajo, o.nombre, o.categoria, o.afiliado, o.ingreso,
      COALESCE(SUM(p.hsn),0) hsn, COALESCE(SUM(p.hs50),0) h50, COALESCE(SUM(p.hs100),0) h100,
-     COALESCE(SUM(p.adic),0) adic, COALESCE(SUM(p.adel),0) adel,
-     COUNT(DISTINCT p.fecha) dias, SUM(CASE WHEN p.adic IS NULL THEN 1 ELSE 0 END) pend
-     FROM parte p JOIN operario o USING(legajo)
-     WHERE p.fecha BETWEEN ? AND ? GROUP BY p.legajo ORDER BY o.nombre`,[D,H]);
-  const pc=k=>cfgN(k);
+     COUNT(DISTINCT p.fecha) dias
+     FROM parte p JOIN operario o USING(legajo) WHERE p.fecha BETWEEN ? AND ?
+     GROUP BY p.legajo ORDER BY o.nombre`,[D,H]);
+  const rep=q(`SELECT legajo, obra, SUM(hsn+hs50*1.5+hs100*2) eq FROM parte
+     WHERE fecha BETWEEN ? AND ? AND obra IS NOT NULL GROUP BY legajo,obra HAVING eq>0`,[D,H]);
+  const pg=q("SELECT * FROM liqpago WHERE per=?",[qnaId()]);
   return R.map(r=>{
+    const mios=rep.filter(x=>x.legajo===r.legajo), tot=mios.reduce((a,x)=>a+x.eq,0);
+    const p=pg.find(x=>x.legajo===r.legajo)||{};
     const e=q("SELECT vh FROM escala WHERE categoria=?",[r.categoria]);
     const vh=e.length?e[0].vh:0;
     const bruto=r.hsn*vh + r.h50*vh*1.5 + r.h100*vh*2;
-    const base=bruto+r.adic;
-    const jub=base*pc("jub")/100, pami=base*pc("pami")/100, os=base*pc("os")/100;
-    const sind=base*(r.afiliado==="SI"?pc("sind"):pc("solid"))/100;
-    const desc=jub+pami+os+sind;
-    const ant=antig(r.ingreso), fcp=(ant!==null&&ant<1)?pc("fc1"):pc("fc2");
-    const cont=base*(pc("cont")+pc("osp")+pc("art")+pc("ap1")+pc("ap2")+pc("uocra"))/100;
-    const cese=base*fcp/100;
-    return {...r, vh, bruto, base, jub, pami, os, sind, desc, neto:base-desc-r.adel,
-            fcp, cont, cese, costo:base+cont+cese};
+    const desc=bruto*(cfgN("jub")+cfgN("pami")+cfgN("os")+(r.afiliado==="SI"?cfgN("sind"):cfgN("solid")))/100;
+    return {...r, eqTot:tot, obras:mios.map(x=>({obra:x.obra, part:tot?x.eq/tot:0})),
+            estim:bruto-desc, neto:p.neto??null, premio:p.premio??null};
   });
 }
-const sumL=(L,k)=>L.reduce((a,x)=>a+(x[k]||0),0);
-function cabLiq(sub){
+const sumH=(L,k)=>L.reduce((a,x)=>a+(x[k]||0),0);
+function cabMO(){
   const [D,H]=rangoQna();
   return `<div class="barra rpBar">
-    <button class="rpTab ${VISTA==="liq"?"on":""}" onclick="nav('liq')">LIQUIDACIÓN</button>
-    <button class="rpTab ${VISTA==="rec"?"on":""}" onclick="nav('rec')">RECIBOS</button>
-    <button class="rpTab ${VISTA==="exp"?"on":""}" onclick="nav('exp')">EXPORTACIÓN</button>
+    <button class="rpTab ${VISTA==="horas"?"on":""}" onclick="nav('horas')">1 · HORAS PARA EL CONTADOR</button>
+    <button class="rpTab ${VISTA==="pago"?"on":""}" onclick="nav('pago')">2 · PAGO DE LA QUINCENA</button>
+    <button class="rpTab ${VISTA==="aport"?"on":""}" onclick="nav('aport')">3 · APORTES M.O.</button>
     <button class="rpTab ${VISTA==="costo"?"on":""}" onclick="nav('costo')">COSTO x OBRA</button>
     <span class="liqQna">QUINCENA <b>${cfg("qna")}ª · ${MESES[cfgN("mes",7)-1]} ${cfg("anio")}</b>
       <em>${D} al ${H}</em> · se cambia en CONFIG</span>
-  </div>${sub||""}`;
+  </div>`;
 }
 
-/* ---------- LIQUIDACIÓN ---------- */
-function renderLiq(){
-  const L=liquidar(), pend=L.reduce((a,x)=>a+x.pend,0);
-  const f=x=>`<tr onclick="RECSEL=${x.legajo};nav('rec')">
-    <td class="num g">${x.legajo}</td><td><b>${x.nombre}</b></td><td>${x.categoria||""}</td>
-    <td class="num g">${x.dias}</td><td class="num">${fmt(x.hsn)}</td><td class="num">${fmt(x.h50)}</td>
-    <td class="num">${x.h100?fmt(x.h100):""}</td><td class="num g">${fmt(x.vh)}</td>
-    <td class="num">${fmt(x.bruto)}</td><td class="num">${x.adic?fmt(x.adic):""}</td>
-    <td class="num neg">${fmt(x.desc)}</td><td class="num neg">${x.adel?fmt(x.adel):""}</td>
-    <td class="num tot">${fmt(x.neto)}</td><td class="num g">${fmt(x.costo)}</td></tr>`;
-  const tot=`<td colspan="3">TOTALES · ${L.length} operarios</td><td class="num">${sumL(L,"dias")}</td>
-    <td class="num">${fmt(sumL(L,"hsn"))}</td><td class="num">${fmt(sumL(L,"h50"))}</td>
-    <td class="num">${fmt(sumL(L,"h100"))}</td><td></td><td class="num">${fmt(sumL(L,"bruto"))}</td>
-    <td class="num">${fmt(sumL(L,"adic"))}</td><td class="num">${fmt(sumL(L,"desc"))}</td>
-    <td class="num">${fmt(sumL(L,"adel"))}</td><td class="num">${fmt(sumL(L,"neto"))}</td>
-    <td class="num">${fmt(sumL(L,"costo"))}</td>`;
-  $("#app").innerHTML = cabLiq() + `<div class="rpWrap"><div class="rpBox">
-   ${pend?`<div class="proyAlerta">⚠ Hay ${pend} jornada${pend===1?"":"s"} sin adicionales cargados en el período.
-     Se liquida igual, pero conviene resolverlas en el PARTE DIARIO antes de pagar.</div>`:""}
-   ${tarj([["OPERARIOS",L.length],["BRUTO",sumL(L,"bruto")],["ADICIONALES",sumL(L,"adic")],
-           ["DESCUENTOS",sumL(L,"desc")],["ADELANTOS",sumL(L,"adel")],["NETO A PAGAR",sumL(L,"neto"),"tt"]])}
-   ${L.length?tb([["LEG.","num"],["OPERARIO"],["CATEGORÍA"],["DÍAS","num"],["HS NORM.","num"],["HS 50%","num"],
-     ["HS 100%","num"],["$/HORA","num"],["BRUTO","num"],["ADICION.","num"],["DESCUENTOS","num"],["ADELANTOS","num"],
-     ["NETO A COBRAR","num"],["COSTO EMPRESA","num"]], L.map(f).join(""), tot)
+/* ---------- 1 · HORAS PARA EL CONTADOR ---------- */
+function renderHoras(){
+  const L=horasQna();
+  $("#app").innerHTML = cabMO() + `<div class="rpWrap"><div class="rpBox">
+   ${cabPrint("HORAS DE LA QUINCENA · PARA EL CONTADOR",qnaTxt())}
+   ${tarj([["OPERARIOS",L.length],["HS NORMALES",sumH(L,"hsn")],["HS AL 50%",sumH(L,"h50")],
+           ["HS AL 100%",sumH(L,"h100")],["JORNADAS",sumH(L,"dias")]])}
+   ${L.length?tb([["LEGAJO","num"],["APELLIDO Y NOMBRE"],["CUIL"],["CATEGORÍA"],["JORNADAS","num"],
+     ["HS NORMALES","num"],["HS AL 50%","num"],["HS AL 100%","num"]],
+     L.map(x=>`<tr><td class="num g">${x.legajo}</td><td><b>${x.nombre}</b></td>
+       <td>${(q("SELECT cuil FROM operario WHERE legajo=?",[x.legajo])[0]||{}).cuil||"—"}</td>
+       <td>${x.categoria||""}</td><td class="num g">${x.dias}</td>
+       <td class="num tot">${fmt(x.hsn)}</td><td class="num">${x.h50?fmt(x.h50):""}</td>
+       <td class="num">${x.h100?fmt(x.h100):""}</td></tr>`).join(""),
+     `<td colspan="4">TOTAL · ${L.length} operarios</td><td class="num">${sumH(L,"dias")}</td>
+      <td class="num">${fmt(sumH(L,"hsn"))}</td><td class="num">${fmt(sumH(L,"h50"))}</td>
+      <td class="num">${fmt(sumH(L,"h100"))}</td>`)
      :`<div class="rpNota">No hay jornadas cargadas en la quincena ${qnaTxt()}.</div>`}
-   <div class="rpNota">Descuentos: jubilación ${cfg("jub")}% · PAMI ${cfg("pami")}% · obra social ${cfg("os")}% ·
-     sindical ${cfg("sind")}% para afiliados o solidario ${cfg("solid")}% para no afiliados, sobre bruto más adicionales.
-     El costo empresa suma contribuciones y Fondo de Cese. · Tocá un operario para ver su recibo.</div>
-  </div></div>
-  <div class="cards liqCards">${L.map(x=>`<div class="lgCard" onclick="RECSEL=${x.legajo};nav('rec')">
-    <div class="lgTop"><span class="lgLeg">${x.legajo}</span><b>${x.nombre}</b></div>
-    <div class="liqML"><span>${x.categoria||""} · ${x.dias} días</span><span>${fmt(x.hsn)} + ${fmt(x.h50)} hs</span></div>
-    <div class="liqML"><span>bruto</span><b>${fmt(x.bruto)}</b></div>
-    ${x.adic?`<div class="liqML"><span>adicionales</span><b>${fmt(x.adic)}</b></div>`:""}
-    <div class="liqML"><span>descuentos</span><b class="neg">${fmt(x.desc)}</b></div>
-    ${x.adel?`<div class="liqML"><span>adelantos</span><b class="neg">${fmt(x.adel)}</b></div>`:""}
-    <div class="liqML fin"><span>NETO A COBRAR</span><b>${fmt(x.neto)}</b></div>
-  </div>`).join("")}</div>` + modalAlta(window.DATOS.maestros);
-}
-
-/* ---------- RECIBOS ---------- */
-let RECSEL=0;
-function renderRec(){
-  const L=liquidar();
-  if(!L.length){ $("#app").innerHTML=cabLiq()+`<div class="rpWrap"><div class="rpNota">Sin jornadas en la quincena.</div></div>`; return; }
-  if(!L.find(x=>x.legajo===RECSEL)) RECSEL=L[0].legajo;
-  const x=L.find(r=>r.legajo===RECSEL), [D,H]=rangoQna();
-  const li=(c,d,h,i)=>`<tr><td>${c}</td><td class="num g">${d||""}</td><td class="num">${h?fmt(h):""}</td><td class="num neg">${i?fmt(i):""}</td></tr>`;
-  $("#app").innerHTML = cabLiq(`<div class="barra recBar">
-     <span>OPERARIO</span>
-     <select onchange="RECSEL=+this.value;renderRec()">${L.map(r=>`<option value="${r.legajo}" ${r.legajo===RECSEL?"selected":""}>${r.legajo} · ${r.nombre}</option>`).join("")}</select>
-     <button class="mini" onclick="window.print()">🖨 IMPRIMIR</button>
-     <button class="mini gris" onclick="csvRecibos()">CSV DE TODOS</button>
-   </div>`) + `<div class="rpWrap"><div class="recibo">
-   <div class="recHead">
-     <div><b>${cfg("razon")}</b><span>CUIT ${cfg("cuit")} · ${cfg("dom")}</span><span>IERIC ${cfg("ieric")}</span></div>
-     <div class="recPer"><small>RECIBO DE HABERES</small><b>${cfg("qna")}ª quincena · ${MESES[cfgN("mes",7)-1]} ${cfg("anio")}</b>
-       <span>${D} al ${H}</span></div>
+   <div class="expBtns">
+     <button class="btn navy" onclick="csvHoras()">DESCARGAR CSV PARA EL CONTADOR</button>
+     <button class="btn gris" onclick="window.print()">🖶 IMPRIMIR</button>
    </div>
-   <div class="recOp">
-     ${(q("SELECT foto FROM operario WHERE legajo=?",[x.legajo])[0]||{}).foto?`<div class="recFoto"><img src="${q("SELECT foto FROM operario WHERE legajo=?",[x.legajo])[0].foto}" alt=""></div>`:""}
-     <div><small>LEGAJO</small><b>${x.legajo}</b></div>
-     <div class="crece"><small>APELLIDO Y NOMBRE</small><b>${x.nombre}</b></div>
-     <div><small>CUIL</small><b>${q("SELECT cuil FROM operario WHERE legajo=?",[x.legajo])[0].cuil||"—"}</b></div>
-     <div><small>CATEGORÍA</small><b>${x.categoria||"—"}</b></div>
-     <div><small>INGRESO</small><b>${x.ingreso||"—"}</b></div>
-     <div><small>AFILIADO</small><b>${x.afiliado||"—"}</b></div>
-   </div>
-   <table class="coTab recTab"><thead><tr><th>CONCEPTO</th><th class="num">CANT.</th><th class="num">HABERES</th><th class="num">DESCUENTOS</th></tr></thead>
-    <tbody>
-     ${li("Jornales · horas normales",fmt(x.hsn)+" hs",x.hsn*x.vh,0)}
-     ${x.h50?li("Horas al 50%",fmt(x.h50)+" hs",x.h50*x.vh*1.5,0):""}
-     ${x.h100?li("Horas al 100%",fmt(x.h100)+" hs",x.h100*x.vh*2,0):""}
-     ${x.adic?li("Adicionales y premios","",x.adic,0):""}
-     ${li("Jubilación · SIPA",cfg("jub")+"%",0,x.jub)}
-     ${li("PAMI · INSSJP",cfg("pami")+"%",0,x.pami)}
-     ${li("Obra social",cfg("os")+"%",0,x.os)}
-     ${li(x.afiliado==="SI"?"Cuota sindical UOCRA":"Aporte solidario",(x.afiliado==="SI"?cfg("sind"):cfg("solid"))+"%",0,x.sind)}
-     ${x.adel?li("Adelantos entregados","",0,x.adel):""}
-     <tr class="coTot"><td colspan="2">TOTALES</td><td class="num">${fmt(x.base)}</td><td class="num">${fmt(x.desc+x.adel)}</td></tr>
-    </tbody></table>
-   <div class="recNeto"><span>NETO A COBRAR</span><b>${fmt(x.neto)}</b></div>
-   <div class="recPie">
-     <div><small>COSTO PARA LA EMPRESA</small><b>${fmt(x.costo)}</b>
-       <em>bruto ${fmt(x.base)} + contribuciones ${fmt(x.cont)} + Fondo de Cese ${fmt(x.cese)} (${x.fcp}%)</em></div>
-     <div class="recFirma"><span>Firma del trabajador</span></div>
-   </div>
+   <div class="rpNota">Esto es todo lo que el contador necesita para liquidar en ARCA. La obra no va:
+     es un dato de gestión, no contable. Con esta planilla él calcula aportes de ley, emite los recibos
+     y determina el total a depositar.</div>
   </div></div>`;
 }
-function csvRecibos(){
-  const L=liquidar(), n=v=>String(Math.round(v||0));
-  const cab=["LEGAJO","OPERARIO","CATEGORIA","DIAS","HS NORM","HS 50","HS 100","VALOR HORA","BRUTO",
-             "ADICIONALES","JUBILACION","PAMI","OBRA SOCIAL","SINDICAL","DESCUENTOS","ADELANTOS","NETO","COSTO EMPRESA"];
-  const lin=L.map(x=>[x.legajo,(x.nombre||"").replace(/;/g,","),x.categoria,x.dias,x.hsn,x.h50,x.h100,n(x.vh),n(x.bruto),
-    n(x.adic),n(x.jub),n(x.pami),n(x.os),n(x.sind),n(x.desc),n(x.adel),n(x.neto),n(x.costo)].join(";"));
+function csvHoras(){
+  const L=horasQna();
+  const cab=["LEGAJO","APELLIDO Y NOMBRE","CUIL","CATEGORIA","JORNADAS","HS NORMALES","HS 50","HS 100"];
+  const lin=L.map(x=>[x.legajo,(x.nombre||"").replace(/;/g,","),
+    (q("SELECT cuil FROM operario WHERE legajo=?",[x.legajo])[0]||{}).cuil||"",
+    x.categoria||"",x.dias,x.hsn,x.h50,x.h100].join(";"));
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob(["\uFEFF"+[cab.join(";"),...lin].join("\r\n")],{type:"text/csv;charset=utf-8"}));
-  a.download=`LIQUIDACION_${cfg("anio")}_${String(cfgN("mes",7)).padStart(2,"0")}_Q${cfg("qna")}.csv`;
+  a.download=`HORAS_${qnaId()}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
 }
 
-/* ---------- EXPORTACIÓN A LA PLANILLA ---------- */
-function asientosQna(){
-  const L=liquidar(), [D,H]=rangoQna();
-  const EQ2="hsn + hs50*1.5 + hs100*2";
-  const rep=q(`SELECT legajo, obra, SUM(${EQ2}) eq FROM parte WHERE fecha BETWEEN ? AND ? AND obra IS NOT NULL
-     GROUP BY legajo, obra HAVING eq>0`,[D,H]);
-  const eqTot=l=>rep.filter(r=>r.legajo===l).reduce((a,r)=>a+r.eq,0);
-  const porObra={}, adicObra={};
+/* ---------- 2 · PAGO DE LA QUINCENA ---------- */
+function pagoSet(l,campo,v){
+  const n=parseFloat(String(v).replace(/\./g,"").replace(",","."))||0;
+  const per=qnaId();
+  if(!q("SELECT 1 x FROM liqpago WHERE per=? AND legajo=?",[per,l]).length)
+    DB.run("INSERT INTO liqpago(per,legajo,neto,premio) VALUES(?,?,0,0)",[per,l]);
+  DB.run(`UPDATE liqpago SET ${campo}=? WHERE per=? AND legajo=?`,[n,per,l]);
+  renderConFoco(renderPago);
+}
+function repartoQna(){
+  const L=horasQna(), obras={};
   for(const x of L){
-    const t=eqTot(x.legajo); if(!t) continue;
-    for(const r of rep.filter(r=>r.legajo===x.legajo)){
-      porObra[r.obra]=(porObra[r.obra]||0) + (x.bruto+x.cont+x.cese)*r.eq/t;
-      if(x.adic) adicObra[r.obra]=(adicObra[r.obra]||0) + x.adic*r.eq/t;
+    const monto=(x.neto||0)+(x.premio||0);
+    if(!monto||!x.obras.length) continue;
+    for(const o of x.obras){
+      obras[o.obra]=obras[o.obra]||{neto:0,premio:0};
+      obras[o.obra].neto+=(x.neto||0)*o.part;
+      obras[o.obra].premio+=(x.premio||0)*o.part;
     }
   }
-  const per=qnaTxt();
-  const A=[];
-  Object.keys(porObra).sort().forEach(o=>A.push({cta:cfg("ctaBco"),tc:"RECIBO",sub:cfg("subRbo"),obra:o,
-    con:`M.O. quincena ${per} · ${o}`, imp:Math.round(porObra[o])}));
-  Object.keys(adicObra).sort().forEach(o=>A.push({cta:cfg("ctaCaja"),tc:"RECIBO",sub:cfg("subAdic"),obra:o,
-    con:`Adicionales quincena ${per} · ${o}`, imp:Math.round(adicObra[o])}));
-  return A;
+  return obras;
 }
-function renderExp(){
-  const A=asientosQna(), G=A.reduce((a,x)=>a+x.imp,0);
-  const L=liquidar();
-  $("#app").innerHTML = cabLiq() + `<div class="rpWrap"><div class="rpBox">
-   ${tarj([["ASIENTOS A GENERAR",A.length],["NETO A PAGAR",sumL(L,"neto")],
-           ["COSTO TOTAL CON CARGAS",G,"tt"]])}
-   ${A.length?tb([["CUENTA"],["CBTE"],["CATEGORÍA"],["SUB"],["OBRA"],["ETAPA"],["CONCEPTO"],["IMPORTE","num"]],
-     A.map(x=>`<tr><td>${x.cta}</td><td>${x.tc}</td><td>Mano Obra</td><td>${x.sub}</td><td><b>${x.obra}</b></td>
-       <td>${cfg("etapaDef")}</td><td>${x.con}</td><td class="num tot">${fmt(x.imp)}</td></tr>`).join(""),
-     `<td colspan="7">TOTAL A CARGAR EN LA PLANILLA</td><td class="num">${fmt(G)}</td>`)
-     :`<div class="rpNota">No hay nada para exportar en esta quincena.</div>`}
-   <div class="expBtns">
-     <label>FECHA DE PAGO<input type="date" id="exp_fec" value="${cfg("fpago")}"></label>
-     <button class="btn navy" onclick="generarQna()">GENERAR LOS ${A.length} ASIENTOS</button>
-     <button class="btn gris" onclick="csvRecibos()">CSV DE LA LIQUIDACIÓN</button>
-   </div>
-   <div id="exp_msg" class="rpNota">Cada asiento va a la obra donde se trabajaron esas horas: el reparto sale del parte
-     diario, ponderando la hora al 50% por 1,5 y la del 100% por 2. Los rótulos salen de CONFIG.</div>
+function renderPago(){
+  const L=horasQna(), rep=repartoQna();
+  const tN=sumH(L,"neto"), tP=sumH(L,"premio"), tE=sumH(L,"estim");
+  const sinCargar=L.filter(x=>x.neto===null).length;
+  const ya=q("SELECT COUNT(*) n FROM mov WHERE cbte=?",["LIQ-"+qnaId()])[0].n;
+  $("#app").innerHTML = cabMO() + `<div class="rpWrap"><div class="rpBox">
+   ${cabPrint("PAGO DE LA QUINCENA",qnaTxt())}
+   ${tarj([["NUESTRO CÁLCULO",tE],["NETO S/CONTADOR",tN],["DIFERENCIA",tN-tE,Math.abs(tN-tE)>tE*0.02?"neg":""],
+           ["PREMIOS Y AJUSTES",tP],["TOTAL A PAGAR",tN+tP,"tt"]])}
+   ${ya?`<div class="proyAlerta">Esta quincena ya tiene ${ya} asiento${ya===1?"":"s"} generado${ya===1?"":"s"}.
+     Si volvés a generar, se van a duplicar.</div>`:""}
+   ${sinCargar?`<div class="rpNota">Faltan cargar ${sinCargar} netos de los ${L.length} operarios.</div>`:""}
+   ${L.length?tb([["LEGAJO","num"],["OPERARIO"],["HS N","num"],["HS 50","num"],["HS 100","num"],
+     ["NUESTRO CÁLCULO","num"],["NETO S/CONTADOR","num"],["DIFER.","num"],["PREMIOS","num"],["A PAGAR","num"],["OBRAS"]],
+     L.map(x=>{ const d=(x.neto||0)-x.estim, al=x.neto!==null&&Math.abs(d)>x.estim*0.05;
+       return `<tr class="${al?"cNo":""}">
+       <td class="num g">${x.legajo}</td><td><b>${x.nombre}</b></td>
+       <td class="num g">${fmt(x.hsn)}</td><td class="num g">${x.h50?fmt(x.h50):""}</td>
+       <td class="num g">${x.h100?fmt(x.h100):""}</td>
+       <td class="num g">${fmt(x.estim)}</td>
+       <td class="num"><input class="pgIn" inputmode="numeric" value="${x.neto!==null?fmt(x.neto):""}"
+          placeholder="—" onchange="pagoSet(${x.legajo},'neto',this.value)"></td>
+       <td class="num ${d<0?"neg":""}">${x.neto!==null?fmt(d):""}</td>
+       <td class="num"><input class="pgIn" inputmode="numeric" value="${x.premio?fmt(x.premio):""}"
+          placeholder="—" onchange="pagoSet(${x.legajo},'premio',this.value)"></td>
+       <td class="num tot">${fmt((x.neto||0)+(x.premio||0))}</td>
+       <td class="g">${x.obras.map(o=>`${o.obra} ${(o.part*100).toFixed(0)}%`).join(" · ")||"—"}</td></tr>`;}).join(""),
+     `<td colspan="5">TOTAL · ${L.length} operarios</td><td class="num">${fmt(tE)}</td>
+      <td class="num">${fmt(tN)}</td><td class="num">${fmt(tN-tE)}</td><td class="num">${fmt(tP)}</td>
+      <td class="num">${fmt(tN+tP)}</td><td></td>`)
+     :`<div class="rpNota">Sin jornadas en la quincena.</div>`}
+   <div class="rpNota">La columna <b>NUESTRO CÁLCULO</b> sale de la escala y los porcentajes de CONFIG:
+     es sólo para contrastar con lo que determinó el contador. Se marcan en rojo las diferencias mayores al 5%.
+     El reparto por obra usa las horas de cada operario, no un promedio.</div>
+
+   ${Object.keys(rep).length?`<div class="proyBox">
+     <div class="proyTit">CÓMO SE IMPUTA A CADA OBRA</div>
+     ${tb([["OBRA"],["JORNALES · s/contador","num"],["PREMIOS · otra caja","num"],["TOTAL","num"],["%","num"]],
+       Object.keys(rep).sort().map(o=>`<tr><td><b>${o}</b></td>
+         <td class="num">${fmt(rep[o].neto)}</td><td class="num">${fmt(rep[o].premio)}</td>
+         <td class="num tot">${fmt(rep[o].neto+rep[o].premio)}</td>
+         <td class="num g">${(tN+tP)?((rep[o].neto+rep[o].premio)/(tN+tP)*100).toFixed(1):0}%</td></tr>`).join(""),
+       `<td>TOTAL</td><td class="num">${fmt(tN)}</td><td class="num">${fmt(tP)}</td>
+        <td class="num">${fmt(tN+tP)}</td><td class="num">100%</td>`)}
+     <div class="expBtns">
+       <label>FECHA DE PAGO<input type="date" id="pg_fec" value="${cfg("fpago")}"></label>
+       <button class="btn navy" onclick="generarPago()">GENERAR LOS ASIENTOS</button>
+     </div>
+     <div id="pg_msg" class="rpNota">Se generan dos juegos: los jornales salen de <b>${cfg("ctaBco")}</b> con
+       comprobante RECIBO, y los premios de <b>${cfg("ctaCaja")}</b> con comprobante FAC X, porque no los liquida el contador.</div>
+   </div>`:""}
   </div></div>`;
 }
-function generarQna(){
-  const A=asientosQna(); if(!A.length) return;
-  const fec=$("#exp_fec").value||hoy, per=qnaTxt();
-  if(!confirm(`Se generan ${A.length} asientos por ${fmt(A.reduce((a,x)=>a+x.imp,0))}, quincena ${per}.`)) return;
+function generarPago(){
+  const rep=repartoQna(), per=qnaId(), fec=$("#pg_fec").value||hoy;
+  const obras=Object.keys(rep).sort();
+  if(!obras.length) return;
+  const n=obras.filter(o=>rep[o].neto>0).length+obras.filter(o=>rep[o].premio>0).length;
+  if(!confirm(`Se generan ${n} asientos por la quincena ${qnaTxt()}.`)) return;
   const ia=DB.prepare("INSERT INTO audit(ts,usuario,accion,mov_id,campo,antes,despues) VALUES(?,?,?,?,?,?,?)");
-  for(const x of A){
-    DB.run(`INSERT INTO mov(cuenta,tipo,tcbte,emis,pago,concepto,neto,categ,sub,obra,etapa)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[x.cta,"TRANSFER",x.tc,fec,fec,x.con,x.imp,"Mano Obra",x.sub,x.obra,cfg("etapaDef")||null]);
+  const alta=(cta,tc,sub,obra,con,imp)=>{
+    DB.run(`INSERT INTO mov(cuenta,tipo,cbte,tcbte,emis,pago,concepto,neto,categ,sub,obra,etapa)
+      VALUES(?,?,?,?,?,?,?,?,'Mano Obra',?,?,?)`,
+      [cta,"TRANSFER","LIQ-"+per,tc,fec,fec,con,Math.round(imp),sub,obra,cfg("etapaDef")||null]);
     const id=q("SELECT MAX(id) m FROM mov")[0].m;
-    ia.run([ahora(),USUARIO,"ALTA AUTOM.",id,"liquidación M.O.",`quincena ${per} · ${x.obra}`,String(x.imp)]);
+    ia.run([ahora(),USUARIO,"ALTA AUTOM.",id,"pago quincena",`${per} · ${obra}`,String(Math.round(imp))]);
+  };
+  for(const o of obras){
+    if(rep[o].neto>0) alta(cfg("ctaBco"),"RECIBO",cfg("subRbo"),o,`Jornales quincena ${qnaTxt()} · ${o}`,rep[o].neto);
+    if(rep[o].premio>0) alta(cfg("ctaCaja"),"FAC X",cfg("subAdic"),o,`Premios quincena ${qnaTxt()} · ${o}`,rep[o].premio);
   }
   ia.free();
-  $("#exp_msg").innerHTML=`<b style="color:#375623">Listo: ${A.length} asientos cargados en la planilla con fecha ${fec}.</b>`;
+  $("#pg_msg").innerHTML=`<b style="color:#375623">Listo: ${n} asientos cargados con fecha ${fec}.</b>`;
+}
+
+/* ---------- 3 · APORTES M.O. ---------- */
+function renderAportes(){
+  const rep=repartoQna(), per=qnaId();
+  const base=Object.keys(rep).reduce((a,o)=>a+rep[o].neto,0);
+  const ap=q("SELECT * FROM liqap WHERE per=?",[per])[0]||{monto:0,cuenta:cfg("ctaBco"),fecha:cfg("fpago")};
+  const L=horasQna();
+  const nuestro=sumH(L,"estim")*(cfgN("cont")+cfgN("osp")+cfgN("art")+cfgN("ap1")+cfgN("ap2")+cfgN("uocra"))/100;
+  const dist={}; Object.keys(rep).forEach(o=>dist[o]=base?ap.monto*rep[o].neto/base:0);
+  const ya=q("SELECT COUNT(*) n FROM mov WHERE cbte=?",["APO-"+per])[0].n;
+  const CTAS=window.DATOS.maestros.cuentas.filter(c=>!["DESACOPIO","SOBREPRECIO"].includes(c));
+  $("#app").innerHTML = cabMO() + `<div class="rpWrap"><div class="rpBox">
+   ${cabPrint("APORTES Y CONTRIBUCIONES M.O.",qnaTxt())}
+   ${tarj([["NUESTRA ESTIMACIÓN",nuestro],["DEPOSITADO S/CONTADOR",ap.monto],
+           ["DIFERENCIA",ap.monto-nuestro,Math.abs(ap.monto-nuestro)>nuestro*0.05?"neg":""],
+           ["BASE DE REPARTO · jornales",base]])}
+   ${ya?`<div class="proyAlerta">Esta quincena ya tiene ${ya} asiento${ya===1?"":"s"} de aportes generado${ya===1?"":"s"}.</div>`:""}
+   <div class="apCarga">
+     <label>TOTAL DEPOSITADO<input id="ap_m" class="numIn" inputmode="numeric" value="${fmt(ap.monto)}"
+       oninput="sepMil(this)" onchange="apSet()"></label>
+     <label>CUENTA<select id="ap_c" onchange="apSet()">${CTAS.map(c=>`<option ${c===ap.cuenta?"selected":""}>${c}</option>`).join("")}</select></label>
+     <label>FECHA<input type="date" id="ap_f" value="${ap.fecha||cfg("fpago")}" onchange="apSet()"></label>
+   </div>
+   ${ap.monto&&base?tb([["OBRA"],["JORNALES DE LA OBRA","num"],["%","num"],["APORTES A IMPUTAR","num"]],
+     Object.keys(rep).sort().map(o=>`<tr><td><b>${o}</b></td><td class="num g">${fmt(rep[o].neto)}</td>
+       <td class="num g">${(rep[o].neto/base*100).toFixed(1)}%</td>
+       <td class="num tot">${fmt(dist[o])}</td></tr>`).join(""),
+     `<td>TOTAL</td><td class="num">${fmt(base)}</td><td class="num">100%</td><td class="num">${fmt(ap.monto)}</td>`)
+     +`<div class="expBtns"><button class="btn navy" onclick="generarAportes()">GENERAR LOS ASIENTOS</button></div>
+       <div id="ap_msg" class="rpNota">Un asiento por obra, categoría Mano Obra, sub-categoría Cargas Sociales,
+         comprobante VEP.</div>`
+     :`<div class="rpNota">Cargá el total depositado para ver el reparto.</div>`}
+   <div class="rpNota">El pago de aportes es global: el contador no lo abre por operario ni por obra.
+     Se reparte <b>en proporción a los jornales ya imputados a cada obra</b>, que es mejor que repartir por
+     horas: el monto de cada operario ya lleva adentro su categoría, así que la mezcla de oficiales
+     y ayudantes de cada obra queda reflejada.</div>
+  </div></div>`;
+}
+function apSet(){
+  const per=qnaId(), m=parseFloat(($("#ap_m").value||"0").replace(/\./g,""))||0;
+  const c=$("#ap_c").value, f=$("#ap_f").value;
+  if(!q("SELECT 1 x FROM liqap WHERE per=?",[per]).length) DB.run("INSERT INTO liqap(per,monto,cuenta,fecha) VALUES(?,0,?,?)",[per,c,f]);
+  DB.run("UPDATE liqap SET monto=?, cuenta=?, fecha=? WHERE per=?",[m,c,f,per]);
+  renderConFoco(renderAportes);
+}
+function generarAportes(){
+  const per=qnaId(), rep=repartoQna();
+  const ap=q("SELECT * FROM liqap WHERE per=?",[per])[0];
+  if(!ap||!ap.monto) return;
+  const base=Object.keys(rep).reduce((a,o)=>a+rep[o].neto,0);
+  if(!base) return;
+  const obras=Object.keys(rep).sort();
+  if(!confirm(`Se generan ${obras.length} asientos de aportes por ${fmt(ap.monto)}.`)) return;
+  const ia=DB.prepare("INSERT INTO audit(ts,usuario,accion,mov_id,campo,antes,despues) VALUES(?,?,?,?,?,?,?)");
+  for(const o of obras){
+    const imp=Math.round(ap.monto*rep[o].neto/base);
+    if(imp<=0) continue;
+    DB.run(`INSERT INTO mov(cuenta,tipo,cbte,tcbte,emis,pago,concepto,neto,categ,sub,obra,etapa)
+      VALUES(?,'TRANSFER',?,'VEP',?,?,?,?,'Mano Obra','Cargas Sociales',?,?)`,
+      [ap.cuenta,"APO-"+per,ap.fecha,ap.fecha,`Aportes M.O. quincena ${qnaTxt()} · ${o}`,imp,o,cfg("etapaDef")||null]);
+    const id=q("SELECT MAX(id) m FROM mov")[0].m;
+    ia.run([ahora(),USUARIO,"ALTA AUTOM.",id,"aportes quincena",`${per} · ${o}`,String(imp)]);
+  }
+  ia.free();
+  $("#ap_msg").innerHTML=`<b style="color:#375623">Listo: ${obras.length} asientos de aportes cargados.</b>`;
 }
 
 /* ==================== REPORTES FINANCIEROS ====================
@@ -2423,7 +2478,9 @@ const FIN = {
   flujo:{tit:"$ FLUJO DE FONDOS",      sol:"FLUJO"},
   imp  :{tit:"$ IMPUESTOS",            sol:"IMPUESTOS"},
   iva  :{tit:"$ IVA · POSICIONES",     sol:"IVA"},
-  ret  :{tit:"$ RETENCIONES",          sol:"RETENCIONES"},
+  iibb :{tit:"$ INGRESOS BRUTOS",      sol:"IIBB"},
+  gcia :{tit:"$ GANANCIAS",            sol:"GANANCIAS"},
+  ret  :{tit:"$ RETENCIONES",         sol:"RETENCIONES"},
   acop :{tit:"$ ACOPIOS / DESACOPIOS", sol:"ACOPIOS"},
   conc :{tit:"$ CONCILIACIÓN BANCARIA",sol:"CONCILIACIÓN"}
 };
@@ -2458,7 +2515,8 @@ function renderFin(){
      ${FINTIPO==="acop"?"":`<select onchange="RPTMES=+this.value;renderFin()">${MESES.map((m,i)=>`<option value="${i+1}" ${i+1===RPTMES?"selected":""}>${m[0]+m.slice(1).toLowerCase()}</option>`).join("")}</select>
      <select onchange="RPTANIO=+this.value;renderFin()">${anios.map(a=>`<option ${a===RPTANIO?"selected":""}>${a}</option>`).join("")}</select>`}
    </div>`;
-  const cuerpo = {ext:finExt, flujo:finFlujo, imp:finImp, iva:finIva, ret:finRet, acop:finAcop, conc:finConc}[FINTIPO](D,H,M);
+  const cuerpo = {ext:finExt, flujo:finFlujo, imp:finImp, iva:finIva, ret:finRet, acop:finAcop, conc:finConc,
+    iibb:(d,hh)=>finImpuesto("iibb",d,hh), gcia:(d,hh)=>finImpuesto("gcia",d,hh)}[FINTIPO](D,H,M);
   $("#app").innerHTML=`
   <div class="barra rpBar">
     ${Object.entries(FIN).map(([k,v])=>`<button class="rpTab ${k===FINTIPO?"on":""}" onclick="verFin('${k}')">${v.sol}</button>`).join("")}
@@ -2827,7 +2885,33 @@ function finIva(D,H){
      `<td>AÑO ${RPTANIO}</td><td class="num">${fmt(tD)}</td><td class="num">${fmt(tC)}</td>
       <td class="num">${fmt(tR)}</td><td class="num">${fmt(pos)}</td><td></td>`)
    + `<div class="rpNota">Por fecha de emisión, que es la que define la posición. Débito menos crédito menos lo que ya nos retuvieron.</div>`
-   + detalleImp('iva',D,H) + detalleImp('iibb',D,H) + detalleImp('gcia',D,H);
+   + detalleImp('iva',D,H);
+}
+
+/* ---------- INGRESOS BRUTOS Y GANANCIAS · mismo formato que IVA ---------- */
+function finImpuesto(k,D,H){
+  const I=IMPS[k], c=I.campo;
+  let filas="", tP=0,tR=0,tN=0;
+  for(let m=1;m<=12;m++){
+    const fin=new Date(RPTANIO,m,0).getDate(), p=n=>String(n).padStart(2,"0");
+    const d=`${RPTANIO}-${p(m)}-01`, hh=`${RPTANIO}-${p(m)}-${fin}`;
+    const r=q(`SELECT COALESCE(SUM(CASE WHEN ${c}>0 THEN ${c} END),0) per,
+      COALESCE(SUM(CASE WHEN ${c}<0 THEN -${c} END),0) ret, COUNT(*) n
+      FROM mov WHERE emis BETWEEN ? AND ? AND ${c}<>0`,[d,hh])[0];
+    if(!r.n) continue;
+    tP+=r.per; tR+=r.ret; tN+=r.n;
+    filas+=`<tr><td><b>${MESES[m-1][0]+MESES[m-1].slice(1).toLowerCase()}</b></td>
+      <td class="num g">${r.n}</td><td class="num">${fmt(r.per)}</td><td class="num">${fmt(r.ret)}</td>
+      <td class="num tot">${fmt(r.per+r.ret)}</td><td class="g">pago a cuenta</td></tr>`;
+  }
+  return tarj([["PERCEPCIONES SUFRIDAS",tP],["RETENCIONES SUFRIDAS",tR],
+               ["COMPROBANTES",tN],["TOTAL A FAVOR",tP+tR,"tt"]])
+   + tb([["MES"],["COMPROB.","num"],["PERCEPCIONES","num"],["RETENCIONES","num"],["TOTAL A FAVOR","num"],["ESTADO"]],filas,
+     `<td>AÑO ${RPTANIO}</td><td class="num">${tN}</td><td class="num">${fmt(tP)}</td>
+      <td class="num">${fmt(tR)}</td><td class="num">${fmt(tP+tR)}</td><td></td>`)
+   + `<div class="rpNota">Por fecha de emisión. Percepciones y retenciones sufridas de ${I.tit} son pago a cuenta:
+      plata ya ingresada al fisco a nombre de la empresa. El impuesto determinado lo liquida el contador con estos comprobantes.</div>`
+   + detalleImp(k,D,H);
 }
 
 /* ---------- DETALLES PARA EL CONTADOR ----------
@@ -3775,13 +3859,13 @@ document.addEventListener("click", e=>{
 });
 const TITULOS={menu:"GESTIÓN CONSTRUCTORA", carga:"PLANILLA de CARGA GENERAL",
   mobil:"PARTE DIARIO · CARGA MÓVIL", plan:"PLAN DE CUENTAS · MAESTROS",
-  costo:"COSTO DE MANO DE OBRA x OBRA", liq:"LIQUIDACIÓN DE MANO DE OBRA", rec:"RECIBOS DE HABERES", exp:"EXPORTACIÓN DE LA QUINCENA", cert:"CERTIFICADO DEL MES", fondo:"FONDO DE RESERVA · CUENTA CORRIENTE", graf:"GRÁFICOS DEL MES", legajos:"· LEGAJOS — PADRÓN DE OPERARIOS",
+  costo:"COSTO DE MANO DE OBRA x OBRA", horas:"HORAS DE LA QUINCENA · PARA EL CONTADOR", pago:"PAGO DE LA QUINCENA", aport:"APORTES Y CONTRIBUCIONES M.O.", cert:"CERTIFICADO DEL MES", fondo:"FONDO DE RESERVA · CUENTA CORRIENTE", graf:"GRÁFICOS DEL MES", legajos:"· LEGAJOS — PADRÓN DE OPERARIOS",
   conf:"· CONFIGURACIÓN — LIQUIDACIÓN M.O.", diario:"PARTE DIARIO DE OBRA"};
 function nav(v){ VISTA=v; $("#tit").textContent = v==="rep" ? RPT[RPTTIPO].tit : (v==="fin" ? FIN[FINTIPO].tit : (TITULOS[v]||"PARTE DIARIO DE OBRA"));
   $("#volver").style.display = v==="menu"?"none":"inline-block";
   $("#lupa").style.display = v==="carga"?"inline-block":"none";
   if(v!=="carga"){ $("#busq").value=""; $("#busq").style.display="none"; $("#nRes").style.display="none"; $("#lupa").classList.remove("on"); busca=""; }
-  if(v==="menu") renderMenu(); else if(v==="carga") renderCarga(); else if(v==="mobil"){ MOBV="hoy"; renderMobil(); } else if(v==="plan") renderPlan(); else if(v==="costo") renderCosto(); else if(v==="rep") renderRep(); else if(v==="fin") renderFin(); else if(v==="liq") renderLiq(); else if(v==="rec") renderRec(); else if(v==="exp") renderExp(); else if(v==="cert") renderCert(); else if(v==="fondo") renderFondo(); else if(v==="graf") renderGraficos(); else if(v==="legajos") renderLegajos(); else if(v==="conf") renderConf(); else renderDiario(); }
+  if(v==="menu") renderMenu(); else if(v==="carga") renderCarga(); else if(v==="mobil"){ MOBV="hoy"; renderMobil(); } else if(v==="plan") renderPlan(); else if(v==="costo") renderCosto(); else if(v==="rep") renderRep(); else if(v==="fin") renderFin(); else if(v==="horas") renderHoras(); else if(v==="pago") renderPago(); else if(v==="aport") renderAportes(); else if(v==="cert") renderCert(); else if(v==="fondo") renderFondo(); else if(v==="graf") renderGraficos(); else if(v==="legajos") renderLegajos(); else if(v==="conf") renderConf(); else renderDiario(); }
 function prox(){ alert("Próxima etapa — este módulo se construye sobre esta misma base."); }
 window.arrancar = async function(){
   const SQL = await initSqlJs({locateFile: f => "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/" + f});
