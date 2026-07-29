@@ -777,6 +777,8 @@ tr.fdUso:hover td{background:#FDECEC}
 .coTab tr.certFin td{background:var(--navy);color:#fff}
 .coTab tr.certFin td.g{color:#BBD3EA}
 .certRot .certT{width:100%;max-width:280px}
+.rmTitMob{background:var(--navy);color:#fff;font-size:13px;font-weight:700;letter-spacing:1.2px;
+  padding:10px 12px;text-align:center}
 </style></head>
 <body>
 <header><button class="home" onclick="nav('menu')">⌂</button><h1 id="tit">GESTIÓN CONSTRUCTORA</h1>
@@ -898,7 +900,9 @@ function renderMenu(){
     </div>
     <div class="dosCol">
      <div>
+      <div class="grupo">Cierre del Mes</div>
       <button class="btn carbon" onclick="nav('cert')" style="background:#1F4E79">CERTIFICADO DEL MES</button>
+      <button class="btn carbon" onclick="nav('fondo')" style="background:#375623">FONDO DE RESERVA</button>
       <div class="grupo">Reportes Financieros</div>
       <button class="btn carbon" onclick="verFin('ext')">$ EXTRACTOS</button>
       <button class="btn carbon" onclick="verFin('flujo')">$ FLUJO FONDOS</button>
@@ -916,7 +920,6 @@ function renderMenu(){
       <button class="btn carbon" onclick="verReporte('mat')">Gastos de MATERIALES</button>
       <button class="btn carbon" onclick="verReporte('eq')">Gastos x EQUIPOS/MAQ.</button>
       <button class="btn carbon" onclick="verReporte('gral')">GASTOS GENERALES</button>
-      <button class="btn carbon" onclick="nav('fondo')">Gastos de FONDO RESERVA</button>
      </div>
     </div>
    </div>
@@ -1713,6 +1716,7 @@ function renderFondo(){
      Para imputar uno, cargá el asiento con categoría <b>FONDO RESERVA</b> y elegí la sub-categoría.</div>
   </div></div>
   <div class="cards certCards">
+   <div class="rmSel"><div class="rmTitMob">FONDO DE RESERVA</div></div>
    <div class="lgCard">
      <div class="liqML"><span>reservado acumulado</span><b>${fmt(RES)}</b></div>
      <div class="liqML"><span>utilizado</span><b class="neg">${fmt(USO)}</b></div>
@@ -1817,6 +1821,14 @@ function renderCert(){
      Las previsiones se calculan sobre el gasto del mes, no en cascada: ninguna se aplica sobre otra.</div>
   </div></div>
   <div class="cards certCards">
+   <div class="rmSel">
+     <div class="rmTitMob">CERTIFICADO DEL MES</div>
+     <div class="rmPer">
+       <select onchange="RPTMES=+this.value;renderCert()">${MESES.map((m,i)=>`<option value="${i+1}" ${i+1===RPTMES?"selected":""}>${m[0]+m.slice(1).toLowerCase()}</option>`).join("")}</select>
+       <select onchange="RPTANIO=+this.value;renderCert()">${anios.map(a=>`<option ${a===RPTANIO?"selected":""}>${a}</option>`).join("")}</select>
+     </div>
+   </div>
+   <div class="rmTot"><small>TOTAL A CERTIFICAR</small><b>${fmt(CERTIF)}</b><span>+ IVA · resultado neto ${fmt(NETO)}</span></div>
    ${obras.map(o=>`<div class="lgCard"><div class="liqML"><b>${o}</b><b>${fmt(totO(o))}</b></div></div>`).join("")}
    <div class="lgCard"><div class="liqML fin"><span>TOTAL GASTOS SIN IVA</span><b>${fmt(GASTOS)}</b></div></div>
    <div class="lgCard">
